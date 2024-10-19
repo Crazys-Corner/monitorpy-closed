@@ -25,7 +25,8 @@ cursor.execute('''
     CREATE TABLE IF NOT EXISTS server_data (
         hostname TEXT PRIMARY KEY,
         data TEXT,
-        last_report_time TEXT
+        last_report_time TEXT,
+        network_status TEXT DEFAULT 'Online'
     )
 ''')
 
@@ -108,25 +109,46 @@ def report():
     ''', (hostname, data_json, last_report_time))
     conn.commit()
 
-    # Add the hostname to the update queue
+    # Add hostname to the update queue
     bot.loop.create_task(update_queue.put(hostname))
-
-    # Send data to an external API endpoint
-    try:
-        external_api_url = "https://your-api-endpoint.com/report"
-        response = requests.post(external_api_url, json=data)
-        response.raise_for_status()
-        print(f"Data successfully sent to external API: {response.status_code}")
-    except requests.RequestException as e:
-        print(f"Failed to send data to external API: {e}")
 
     # Emit data to WebSocket clients
     socketio.emit('update', data)
 
-    # Check for notifications
-    check_notifications(hostname, data)
+    # Recalculate and print the global network status
+    global_network_status = calculate_global_network_status()
+    print(f"Global Network Status: {global_network_status}")
 
     return jsonify({"status": "success"}), 200
+
+
+@app.route('/network_status', methods=['GET'])
+def get_global_network_status():
+    network_status = calculate_global_network_status()
+    return jsonify({"network_status": network_status}), 200
+
+
+
+def calculate_global_network_status():
+    cursor.execute('SELECT hostname, last_report_time FROM server_data')
+    servers = cursor.fetchall()
+
+    total_servers = len(servers)
+    if total_servers == 0:
+        return "Online"  # No servers being monitored
+
+    now = datetime.now()
+    down_servers = sum(
+        1 for _, last_report in servers 
+        if now - datetime.fromisoformat(last_report) > timedelta(minutes=1)
+    )
+
+    if down_servers == 0:
+        return "Online"
+    elif down_servers / total_servers < 0.5:
+        return "Degraded"
+    else:
+        return "Down"
 
 def start_flask_server():
     app.run(host='0.0.0.0', port=5000)
